@@ -893,9 +893,31 @@ async function joinRoom() {
             } else if (state === 'disconnected') {
                 recvTransportConnected = false;
                 console.warn('⚠️ Receive transport disconnected');
+                console.warn('⚠️ Remote video/audio will stop working');
                 updateStatus('Connection lost. Remote video/audio may not work.', false);
             } else if (state === 'new') {
                 console.log('ℹ️ Receive transport in new state (will connect when needed)');
+            }
+            
+            // CRITICAL: If transport reconnected, resume all paused consumers
+            if (state === 'connected' && recvTransportFailureCount > 0) {
+                console.log('🔄 Transport reconnected - resuming paused consumers...');
+                consumers.forEach(({ consumer, peerId, kind }) => {
+                    if (consumer.paused) {
+                        console.log(`Resuming consumer after transport reconnect: ${consumer.id} (${kind} from ${peerId})`);
+                        consumer.resume();
+                        if (socket && socket.connected) {
+                            socket.emit('resume-consumer', { consumerId: consumer.id }, (response) => {
+                                if (response && response.error) {
+                                    console.error('Error resuming consumer after reconnect:', response.error);
+                                } else {
+                                    console.log('✅ Consumer resumed after transport reconnect:', consumer.id);
+                                }
+                            });
+                        }
+                    }
+                });
+                recvTransportFailureCount = 0; // Reset failure count
             }
         });
         
@@ -1380,29 +1402,39 @@ async function consumeProducer(remotePeerId, producerId, kind) {
         }
         
         // CRITICAL: Ensure receive transport is connected before consuming
-        // The receive transport connects automatically when consuming, but we should verify
+        // The receive transport MUST be connected for consumers to receive data
         const currentState = recvTransport.connectionState;
         console.log('📊 Receive transport state before consume:', currentState);
         
+        // Handle failed state - cannot proceed
         if (currentState === 'failed') {
-            console.error('❌ Receive transport is in failed state - cannot consume');
-            console.error('This may prevent remote video from displaying');
+            console.error('❌ Receive transport is in FAILED state - cannot consume');
+            console.error('This WILL prevent remote video from displaying');
             console.error('Possible causes:');
             console.error('  - Network connectivity issues');
             console.error('  - Firewall blocking WebRTC');
             console.error('  - Server-side transport error');
             console.error('  - DTLS handshake failure');
+            console.error('  - ICE connection failure');
             console.error('Try refreshing the page or check network connectivity');
-            // Don't return - MediaSoup might still allow consuming, or it will fail gracefully
+            throw new Error('Receive transport is in failed state - cannot consume producer');
         }
         
-        if (currentState === 'new' || currentState === 'connecting') {
+        // Handle disconnected state - wait for reconnection
+        if (currentState === 'disconnected') {
+            console.warn('⚠️ Receive transport is DISCONNECTED - waiting for reconnection...');
+            // MediaSoup may reconnect automatically when we try to consume
+        }
+        
+        // Wait for transport to connect if needed
+        if (currentState === 'new' || currentState === 'connecting' || currentState === 'disconnected') {
             console.log('⏳ Receive transport not connected, waiting for connection...');
             let waitCount = 0;
-            const maxWait = 50; // 5 seconds
+            const maxWait = 100; // 10 seconds (increased timeout)
             
             while ((recvTransport.connectionState === 'new' || 
-                    recvTransport.connectionState === 'connecting') && 
+                    recvTransport.connectionState === 'connecting' ||
+                    recvTransport.connectionState === 'disconnected') && 
                    waitCount < maxWait) {
                 if (waitCount % 10 === 0) {
                     console.log(`⏳ Waiting for receive transport (${waitCount}/${maxWait}):`, recvTransport.connectionState);
@@ -1415,11 +1447,16 @@ async function consumeProducer(remotePeerId, producerId, kind) {
             if (finalState === 'connected') {
                 console.log('✅ Receive transport connected, proceeding with consume');
             } else if (finalState === 'failed') {
-                console.error('❌ Receive transport failed during wait - consume may fail');
-                console.error('Remote video may not display due to transport failure');
+                console.error('❌ Receive transport failed during wait - cannot consume');
+                throw new Error('Receive transport failed - cannot consume producer');
+            } else if (finalState === 'disconnected') {
+                console.error('❌ Receive transport still disconnected after wait');
+                console.error('Remote video will NOT work without connected transport');
+                throw new Error('Receive transport disconnected - cannot consume producer');
             } else {
                 console.warn('⚠️ Receive transport state:', finalState, '- proceeding with consume anyway');
                 console.warn('MediaSoup may connect the transport automatically during consume');
+                console.warn('If video doesn\'t appear, check transport state');
             }
         } else if (currentState === 'connected') {
             console.log('✅ Receive transport already connected');
@@ -1471,7 +1508,31 @@ async function consumeProducer(remotePeerId, producerId, kind) {
             console.log('Consumer track unmuted:', consumer.id, remotePeerId);
         });
 
-        // Resume consumer to start receiving data
+        // CRITICAL: Resume consumer to start receiving data
+        // MediaSoup pauses consumers by default - they MUST be resumed
+        console.log('Consumer state before resume:', {
+            paused: consumer.paused,
+            trackState: consumer.track.readyState,
+            trackMuted: consumer.track.muted,
+            transportState: recvTransport.connectionState
+        });
+
+        // Verify transport is connected before resuming
+        if (recvTransport.connectionState !== 'connected') {
+            console.error('❌ Cannot resume consumer - receive transport not connected');
+            console.error('Transport state:', recvTransport.connectionState);
+            throw new Error(`Receive transport is ${recvTransport.connectionState}, cannot resume consumer`);
+        }
+
+        // Resume consumer (client-side)
+        if (consumer.paused) {
+            console.log('🔄 Resuming paused consumer:', consumer.id);
+            consumer.resume();
+        } else {
+            console.log('ℹ️ Consumer already resumed:', consumer.id);
+        }
+
+        // Notify server to resume consumer (REQUIRED)
         await new Promise((resolve, reject) => {
             if (!socket || !socket.connected) {
                 reject(new Error('Socket is not connected'));
@@ -1480,17 +1541,77 @@ async function consumeProducer(remotePeerId, producerId, kind) {
 
             socket.emit('resume-consumer', { consumerId: consumer.id }, (response) => {
                 if (response && response.error) {
-                    console.error('Resume consumer error:', response.error);
+                    console.error('❌ Resume consumer error from server:', response.error);
                     reject(new Error(response.error));
                 } else {
-                    console.log('Consumer resumed:', consumer.id);
+                    console.log('✅ Consumer resumed on server:', consumer.id);
                     resolve();
                 }
             });
         });
 
-        // Small delay to ensure track is ready
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Verify consumer is actually resumed
+        await new Promise(resolve => setTimeout(resolve, 200)); // Give it time to process
+        
+        if (consumer.paused) {
+            console.error('❌ Consumer still paused after resume - retrying...');
+            consumer.resume();
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            if (consumer.paused) {
+                console.error('❌ Consumer still paused after retry - this is a problem!');
+                console.error('Transport state:', recvTransport.connectionState);
+                console.error('Track state:', consumer.track.readyState);
+            }
+        }
+
+        // Check track muted state
+        if (consumer.track.muted) {
+            console.warn('⚠️ Consumer track is muted - waiting for unmute...');
+            console.warn('This may cause black video screen');
+            
+            // Wait for unmute event (with timeout)
+            await new Promise((resolve) => {
+                const unmuteHandler = () => {
+                    console.log('✅ Consumer track unmuted');
+                    consumer.track.removeEventListener('unmute', unmuteHandler);
+                    resolve();
+                };
+                
+                consumer.track.addEventListener('unmute', unmuteHandler);
+                
+                // Timeout after 3 seconds
+                setTimeout(() => {
+                    consumer.track.removeEventListener('unmute', unmuteHandler);
+                    console.warn('⚠️ Track unmute timeout - proceeding anyway');
+                    resolve();
+                }, 3000);
+            });
+        }
+
+        // Final state check before displaying
+        console.log('Consumer state after resume:', {
+            paused: consumer.paused,  // Should be false
+            trackState: consumer.track.readyState,  // Should be 'live'
+            trackMuted: consumer.track.muted,  // Should be false
+            transportState: recvTransport.connectionState  // Should be 'connected'
+        });
+
+        // Verify consumer is ready to receive data
+        const isReady = !consumer.paused && 
+                       consumer.track.readyState === 'live' && 
+                       !consumer.track.muted &&
+                       recvTransport.connectionState === 'connected';
+        
+        if (!isReady) {
+            console.warn('⚠️ Consumer not fully ready:', {
+                paused: consumer.paused,
+                trackState: consumer.track.readyState,
+                trackMuted: consumer.track.muted,
+                transportState: recvTransport.connectionState
+            });
+            console.warn('Video may not display correctly');
+        }
 
         // Display remote video/audio
         if (kind === 'video') {
