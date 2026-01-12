@@ -1,0 +1,11 @@
+node_modules/
+npm-debug.log
+.env
+.DS_Store
+*.log
+
+# SSL Certificates (keep private!)
+certs/
+*.pem
+*.key
+*.crt
