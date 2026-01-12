@@ -346,7 +346,26 @@ async function init() {
         });
 
         socket.on('new-producer', async ({ peerId: newPeerId, producerId, kind }) => {
-            console.log(`New producer: ${producerId} from ${newPeerId}`);
+            console.log(`New producer event received: ${producerId} from ${newPeerId}, kind: ${kind}`);
+            
+            // Don't consume our own producers
+            if (newPeerId === peerId) {
+                console.log('Ignoring own producer');
+                return;
+            }
+            
+            // Ensure we're ready to consume
+            if (!recvTransport || !device) {
+                console.warn('Not ready to consume, will retry...');
+                // Retry after a delay
+                setTimeout(async () => {
+                    if (recvTransport && device) {
+                        await consumeProducer(newPeerId, producerId, kind);
+                    }
+                }, 1000);
+                return;
+            }
+            
             await consumeProducer(newPeerId, producerId, kind);
         });
 
@@ -1165,13 +1184,26 @@ async function joinRoom() {
         // Display local video
         displayLocalVideo();
 
-        // Get existing producers
+        // Get existing producers (for peers already in the room)
         if (socket && socket.connected) {
+            console.log('Requesting existing producers...');
             socket.emit('get-producers', (response) => {
-                if (response && response.producers) {
+                if (response && response.error) {
+                    console.error('Error getting producers:', response.error);
+                    return;
+                }
+                
+                if (response && response.producers && response.producers.length > 0) {
+                    console.log(`Found ${response.producers.length} existing producer(s) to consume`);
                     response.producers.forEach(({ peerId: pId, producerId, kind }) => {
-                        consumeProducer(pId, producerId, kind);
+                        // Don't consume our own producers
+                        if (pId !== peerId) {
+                            console.log(`Consuming existing ${kind} producer from ${pId}:`, producerId);
+                            consumeProducer(pId, producerId, kind);
+                        }
                     });
+                } else {
+                    console.log('No existing producers found');
                 }
             });
         }
@@ -1251,6 +1283,8 @@ function checkMediaDeviceSupport() {
 
 async function consumeProducer(remotePeerId, producerId, kind) {
     try {
+        console.log(`Consuming ${kind} producer:`, { remotePeerId, producerId });
+        
         if (!socket || !socket.connected) {
             console.error('Socket is not connected, cannot consume producer');
             return;
@@ -1259,6 +1293,25 @@ async function consumeProducer(remotePeerId, producerId, kind) {
         if (!recvTransport || !device) {
             console.error('Transport or device not initialized');
             return;
+        }
+        
+        // CRITICAL: Ensure receive transport is connected before consuming
+        // The receive transport connects automatically when consuming, but we should verify
+        if (recvTransport.connectionState === 'new' || recvTransport.connectionState === 'connecting') {
+            console.log('Receive transport not connected, waiting for connection...');
+            let waitCount = 0;
+            while ((recvTransport.connectionState === 'new' || 
+                    recvTransport.connectionState === 'connecting') && 
+                   waitCount < 50) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                waitCount++;
+            }
+            
+            if (recvTransport.connectionState !== 'connected') {
+                console.warn('Receive transport did not connect, but proceeding with consume');
+            } else {
+                console.log('Receive transport connected, proceeding with consume');
+            }
         }
 
         const response = await new Promise((resolve, reject) => {
@@ -1272,13 +1325,17 @@ async function consumeProducer(remotePeerId, producerId, kind) {
                     return;
                 }
                 if (response.error) {
+                    console.error('Consume error from server:', response.error);
                     reject(new Error(response.error));
                 } else {
+                    console.log(`Consume response received for ${kind}:`, response.id);
                     resolve(response);
                 }
             });
         });
 
+        console.log('Creating consumer for:', { id: response.id, producerId: response.producerId, kind: response.kind });
+        
         const consumer = await recvTransport.consume({
             id: response.id,
             producerId: response.producerId,
@@ -1286,8 +1343,24 @@ async function consumeProducer(remotePeerId, producerId, kind) {
             rtpParameters: response.rtpParameters,
         });
 
-        consumers.set(consumer.id, { consumer, peerId: remotePeerId, kind });
+        console.log('Consumer created:', consumer.id, 'Track state:', consumer.track.readyState);
 
+        consumers.set(consumer.id, { consumer, peerId: remotePeerId, kind });
+        
+        // Add track event listeners for debugging
+        consumer.track.addEventListener('ended', () => {
+            console.warn('Consumer track ended:', consumer.id, remotePeerId);
+        });
+        
+        consumer.track.addEventListener('mute', () => {
+            console.log('Consumer track muted:', consumer.id, remotePeerId);
+        });
+        
+        consumer.track.addEventListener('unmute', () => {
+            console.log('Consumer track unmuted:', consumer.id, remotePeerId);
+        });
+
+        // Resume consumer to start receiving data
         await new Promise((resolve, reject) => {
             if (!socket || !socket.connected) {
                 reject(new Error('Socket is not connected'));
@@ -1296,27 +1369,53 @@ async function consumeProducer(remotePeerId, producerId, kind) {
 
             socket.emit('resume-consumer', { consumerId: consumer.id }, (response) => {
                 if (response && response.error) {
+                    console.error('Resume consumer error:', response.error);
                     reject(new Error(response.error));
                 } else {
+                    console.log('Consumer resumed:', consumer.id);
                     resolve();
                 }
             });
         });
 
+        // Small delay to ensure track is ready
+        await new Promise(resolve => setTimeout(resolve, 100));
+
         // Display remote video/audio
         if (kind === 'video') {
+            console.log('Displaying remote video track for:', remotePeerId);
             displayRemoteVideo(remotePeerId, consumer.track);
-        } else {
+        } else if (kind === 'audio') {
+            console.log('Attaching remote audio track for:', remotePeerId);
             attachRemoteAudio(remotePeerId, consumer.track);
         }
     } catch (error) {
         console.error('Error consuming producer:', error);
+        console.error('Error details:', {
+            message: error.message,
+            stack: error.stack,
+            remotePeerId,
+            producerId,
+            kind
+        });
     }
 }
 
 function displayLocalVideo() {
     const container = document.getElementById('videosContainer');
-    container.innerHTML = '';
+    
+    // Check if local video already exists
+    const existingLocalVideo = document.getElementById(`video-${peerId}`);
+    if (existingLocalVideo) {
+        console.log('Local video already displayed');
+        return;
+    }
+    
+    // Don't clear container - preserve existing remote videos
+    // Only clear if container is empty (initial state)
+    if (container.children.length === 0 || container.querySelector('.empty-state')) {
+        container.innerHTML = '';
+    }
 
     const videoWrapper = document.createElement('div');
     videoWrapper.className = 'video-wrapper local';
@@ -1335,35 +1434,207 @@ function displayLocalVideo() {
     videoWrapper.appendChild(video);
     videoWrapper.appendChild(label);
     container.appendChild(videoWrapper);
+    
+    console.log('Local video displayed:', peerId);
 }
 
 function displayRemoteVideo(remotePeerId, track) {
-    if (remoteVideos.has(remotePeerId)) {
-        const existingVideo = remoteVideos.get(remotePeerId);
-        existingVideo.srcObject = new MediaStream([track]);
+    console.log('🔄 Displaying remote video for:', remotePeerId, 'Track state:', track.readyState);
+    
+    // CRITICAL: Validate track before proceeding
+    if (!track) {
+        console.error('❌ No track provided for:', remotePeerId);
         return;
     }
-
-    const container = document.getElementById('videosContainer');
     
-    const videoWrapper = document.createElement('div');
+    if (track.readyState === 'ended') {
+        console.error('❌ Track already ended for:', remotePeerId);
+        return;
+    }
+    
+    const container = document.getElementById('videosContainer');
+    if (!container) {
+        console.error('❌ Videos container not found');
+        return;
+    }
+    
+    // Check if video already exists for this peer
+    let videoElement = remoteVideos.get(remotePeerId);
+    let videoWrapper = document.getElementById(`video-${remotePeerId}`);
+    
+    if (videoElement && videoWrapper) {
+        console.log('🔄 Updating existing remote video for:', remotePeerId);
+        // Update existing video with new track
+        const stream = new MediaStream([track]);
+        videoElement.srcObject = stream;
+        
+        // Ensure video plays
+        videoElement.play().catch(err => {
+            console.error('❌ Error playing existing remote video:', err);
+            // Retry after delay
+            setTimeout(() => {
+                videoElement.play().catch(retryErr => {
+                    console.error('❌ Retry play failed:', retryErr);
+                });
+            }, 1000);
+        });
+        return;
+    }
+    
+    // Create new video element
+    videoWrapper = document.createElement('div');
     videoWrapper.className = 'video-wrapper';
     videoWrapper.id = `video-${remotePeerId}`;
 
-    const video = document.createElement('video');
-    video.autoplay = true;
-    video.playsInline = true;
-    video.srcObject = new MediaStream([track]);
+    videoElement = document.createElement('video');
+    videoElement.autoplay = true;
+    videoElement.playsInline = true;
+    videoElement.muted = false; // Unmute remote video
+    
+    // CRITICAL: Create MediaStream with the track
+    const stream = new MediaStream([track]);
+    videoElement.srcObject = stream;
+    
+    // CRITICAL: Add comprehensive event listeners for debugging
+    videoElement.addEventListener('loadedmetadata', () => {
+        console.log('✅ Remote video metadata loaded for:', remotePeerId);
+        console.log('   Video dimensions:', videoElement.videoWidth, 'x', videoElement.videoHeight);
+    });
+    
+    videoElement.addEventListener('loadeddata', () => {
+        console.log('✅ Remote video data loaded for:', remotePeerId);
+    });
+    
+    videoElement.addEventListener('canplay', () => {
+        console.log('✅ Remote video can play for:', remotePeerId);
+    });
+    
+    videoElement.addEventListener('playing', () => {
+        console.log('✅ Remote video is playing for:', remotePeerId);
+    });
+    
+    videoElement.addEventListener('play', () => {
+        console.log('✅ Remote video started playing for:', remotePeerId);
+    });
+    
+    videoElement.addEventListener('pause', () => {
+        console.warn('⚠️ Remote video paused for:', remotePeerId);
+    });
+    
+    videoElement.addEventListener('error', (e) => {
+        console.error('❌ Remote video error for:', remotePeerId);
+        console.error('   Error code:', videoElement.error?.code);
+        console.error('   Error message:', videoElement.error?.message);
+        console.error('   Error details:', e);
+    });
+    
+    videoElement.addEventListener('stalled', () => {
+        console.warn('⚠️ Remote video stalled for:', remotePeerId);
+    });
+    
+    videoElement.addEventListener('waiting', () => {
+        console.warn('⚠️ Remote video waiting for data:', remotePeerId);
+    });
+    
+    // Monitor track state changes
+    const trackStateHandler = () => {
+        console.log(`Track state changed for ${remotePeerId}:`, track.readyState);
+        if (track.readyState === 'ended') {
+            console.warn('⚠️ Track ended for:', remotePeerId);
+        }
+    };
+    
+    track.addEventListener('ended', () => {
+        console.warn('⚠️ Track ended event for:', remotePeerId);
+        trackStateHandler();
+    });
+    
+    track.addEventListener('mute', () => {
+        console.log('Track muted for:', remotePeerId);
+    });
+    
+    track.addEventListener('unmute', () => {
+        console.log('Track unmuted for:', remotePeerId);
+    });
+    
+    // CRITICAL: Explicit play() call with comprehensive error handling
+    const playVideo = async () => {
+        try {
+            await videoElement.play();
+            console.log('✅ Video play() succeeded for:', remotePeerId);
+        } catch (error) {
+            console.error('❌ Video play() failed for:', remotePeerId, error);
+            console.error('   Error name:', error.name);
+            console.error('   Error message:', error.message);
+            
+            // Handle different error types
+            if (error.name === 'NotAllowedError') {
+                console.warn('⚠️ Autoplay blocked by browser policy');
+                console.warn('   Video will play after user interaction');
+                // Add click handler to play on user interaction
+                const playOnInteraction = () => {
+                    videoElement.play().catch(e => console.error('Play on interaction failed:', e));
+                    document.removeEventListener('click', playOnInteraction);
+                    document.removeEventListener('touchstart', playOnInteraction);
+                };
+                document.addEventListener('click', playOnInteraction, { once: true });
+                document.addEventListener('touchstart', playOnInteraction, { once: true });
+            } else {
+                // Retry after delay for other errors
+                console.log('🔄 Retrying video play() after 1 second...');
+                setTimeout(async () => {
+                    try {
+                        await videoElement.play();
+                        console.log('✅ Video play() retry succeeded for:', remotePeerId);
+                    } catch (retryError) {
+                        console.error('❌ Video play() retry failed for:', remotePeerId, retryError);
+                        // Final retry after longer delay
+                        setTimeout(async () => {
+                            try {
+                                await videoElement.play();
+                                console.log('✅ Video play() final retry succeeded for:', remotePeerId);
+                            } catch (finalError) {
+                                console.error('❌ Video play() final retry failed:', finalError);
+                            }
+                        }, 2000);
+                    }
+                }, 1000);
+            }
+        }
+    };
+    
+    // Wait for track to be ready, then play
+    if (track.readyState === 'live') {
+        // Track is ready, play immediately
+        setTimeout(playVideo, 100); // Small delay to ensure DOM is ready
+    } else {
+        // Wait for track to become live
+        const trackStartedHandler = () => {
+            console.log('✅ Track started for:', remotePeerId);
+            playVideo();
+        };
+        
+        track.addEventListener('started', trackStartedHandler, { once: true });
+        
+        // Fallback: try playing after delay even if 'started' event doesn't fire
+        setTimeout(() => {
+            if (track.readyState === 'live' && videoElement.paused) {
+                console.log('🔄 Fallback: Attempting to play video...');
+                playVideo();
+            }
+        }, 500);
+    }
 
     const label = document.createElement('div');
     label.className = 'video-label';
     label.textContent = remotePeerId;
 
-    videoWrapper.appendChild(video);
+    videoWrapper.appendChild(videoElement);
     videoWrapper.appendChild(label);
     container.appendChild(videoWrapper);
 
-    remoteVideos.set(remotePeerId, video);
+    remoteVideos.set(remotePeerId, videoElement);
+    console.log('✅ Remote video element created and attached for:', remotePeerId);
 }
 
 function attachRemoteAudio(remotePeerId, track) {
@@ -1480,6 +1751,72 @@ async function leaveRoom() {
         console.error('Error leaving room:', error);
     }
 }
+
+/**
+ * Debug helper: Check state of all video elements and consumers
+ * Call this from browser console: checkVideoState()
+ */
+function checkVideoState() {
+    console.log('=== VIDEO STATE DEBUG ===');
+    
+    // Check consumers
+    console.log('\n📹 Consumers:');
+    consumers.forEach(({ consumer, peerId, kind }) => {
+        console.log(`  ${kind} from ${peerId}:`, {
+            id: consumer.id,
+            producerId: consumer.producerId,
+            trackState: consumer.track.readyState,
+            trackEnabled: consumer.track.enabled,
+            trackMuted: consumer.track.muted,
+            paused: consumer.paused
+        });
+    });
+    
+    // Check remote videos
+    console.log('\n🎥 Remote Video Elements:');
+    remoteVideos.forEach((video, peerId) => {
+        const wrapper = document.getElementById(`video-${peerId}`);
+        console.log(`  ${peerId}:`, {
+            exists: !!video,
+            wrapperExists: !!wrapper,
+            srcObject: !!video.srcObject,
+            paused: video.paused,
+            readyState: video.readyState,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            error: video.error,
+            tracks: video.srcObject ? video.srcObject.getTracks().map(t => ({
+                id: t.id,
+                kind: t.kind,
+                readyState: t.readyState,
+                enabled: t.enabled,
+                muted: t.muted
+            })) : []
+        });
+    });
+    
+    // Check all video elements in DOM
+    console.log('\n📺 All Video Elements in DOM:');
+    document.querySelectorAll('video').forEach((video, index) => {
+        console.log(`  Video ${index}:`, {
+            id: video.id,
+            parentId: video.parentElement?.id,
+            srcObject: !!video.srcObject,
+            paused: video.paused,
+            muted: video.muted,
+            autoplay: video.autoplay,
+            readyState: video.readyState,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            error: video.error
+        });
+    });
+    
+    console.log('\n=== END DEBUG ===');
+}
+
+// Make it available globally for console debugging
+window.checkVideoState = checkVideoState;
 
 // Attach event listeners
 function attachEventListeners() {
