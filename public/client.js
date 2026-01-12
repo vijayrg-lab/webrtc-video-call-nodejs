@@ -774,55 +774,139 @@ async function joinRoom() {
 
         recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
             try {
+                console.log('🔄 Receive transport connect event triggered');
+                
                 if (!socket || !socket.connected) {
-                    errback(new Error('Socket is not connected'));
+                    const error = new Error('Socket is not connected');
+                    console.error('❌', error.message);
+                    errback(error);
                     return;
                 }
 
                 if (!dtlsParameters) {
-                    errback(new Error('dtlsParameters is missing'));
+                    const error = new Error('dtlsParameters is missing');
+                    console.error('❌', error.message);
+                    errback(error);
                     return;
                 }
 
-                console.log('Connecting receive transport:', recvTransport.id);
-                console.log('DTLS parameters:', JSON.stringify(dtlsParameters, null, 2));
+                console.log('🔄 Connecting receive transport:', recvTransport.id);
+                console.log('DTLS fingerprint:', dtlsParameters.fingerprints?.[0]?.value);
+
+                // Set timeout for connection attempt
+                const connectTimeout = setTimeout(() => {
+                    console.error('❌ Receive transport connect timeout after 10 seconds');
+                    errback(new Error('Receive transport connection timeout'));
+                }, 10000); // 10 second timeout
 
                 socket.emit('connect-transport', {
                     transportId: recvTransport.id,
                     dtlsParameters,
                 }, (response) => {
+                    clearTimeout(connectTimeout);
+                    
                     if (!response) {
-                        errback(new Error('No response from server'));
+                        const error = new Error('No response from server');
+                        console.error('❌', error.message);
+                        errback(error);
                         return;
                     }
+                    
                     if (response.error) {
-                        console.error('Receive transport connect error:', response.error);
+                        console.error('❌ Receive transport connect error from server:', response.error);
+                        console.error('Error details:', {
+                            transportId: recvTransport.id,
+                            error: response.error
+                        });
                         errback(new Error(response.error));
                     } else {
-                        console.log('Receive transport connected successfully');
+                        console.log('✅ Receive transport connect response received from server');
                         // Small delay to ensure connection is stable
                         setTimeout(() => {
                             callback();
+                            console.log('✅ Receive transport connect callback executed');
                         }, 100);
                     }
                 });
             } catch (error) {
-                console.error('Receive transport connect exception:', error);
+                console.error('❌ Receive transport connect exception:', error);
+                console.error('Exception details:', {
+                    message: error.message,
+                    stack: error.stack,
+                    transportId: recvTransport.id
+                });
                 errback(error);
             }
         });
 
-        // Add error handler for receive transport
+        // Add comprehensive error handler for receive transport
         let recvTransportConnected = false;
+        let recvTransportFailureCount = 0;
+        
         recvTransport.on('connectionstatechange', (state) => {
-            console.log('Receive transport connection state:', state);
+            console.log('Receive transport connection state changed:', state);
+            console.log('Receive transport ID:', recvTransport.id);
+            
             if (state === 'connected') {
                 recvTransportConnected = true;
-            }
-            if (state === 'failed' || state === 'disconnected') {
-                console.error('Receive transport connection failed');
+                recvTransportFailureCount = 0; // Reset failure count on success
+                console.log('✅ Receive transport connected successfully');
+                
+                // Clear any previous error messages
+                const statusEl = document.getElementById('status');
+                if (statusEl && statusEl.textContent.includes('receive transport')) {
+                    updateStatus('Connected', true);
+                }
+            } else if (state === 'connecting') {
+                console.log('⏳ Receive transport connecting...');
+            } else if (state === 'failed') {
                 recvTransportConnected = false;
+                recvTransportFailureCount++;
+                console.error('❌ Receive transport connection FAILED');
+                console.error('Failure count:', recvTransportFailureCount);
+                
+                // Log additional diagnostic information
+                console.error('Receive transport details:', {
+                    id: recvTransport.id,
+                    state: recvTransport.connectionState,
+                    appData: recvTransport.appData
+                });
+                
+                // Check if this is blocking remote video
+                if (consumers.size > 0) {
+                    console.warn('⚠️ Receive transport failed but consumers exist - remote video may not work');
+                }
+                
+                // Show user-friendly error message
+                if (recvTransportFailureCount === 1) {
+                    // Only show on first failure to avoid spam
+                    updateStatus('Connection issue: Cannot receive remote video/audio. Check console for details.', false);
+                    console.error('💡 Troubleshooting tips:');
+                    console.error('  1. Check your network connection');
+                    console.error('  2. Check firewall settings');
+                    console.error('  3. Try refreshing the page');
+                    console.error('  4. Check server logs for errors');
+                }
+                
+                // Note: In MediaSoup, receive transport connects automatically when consuming
+                // A failure here might recover when we try to consume
+            } else if (state === 'disconnected') {
+                recvTransportConnected = false;
+                console.warn('⚠️ Receive transport disconnected');
+                updateStatus('Connection lost. Remote video/audio may not work.', false);
+            } else if (state === 'new') {
+                console.log('ℹ️ Receive transport in new state (will connect when needed)');
             }
+        });
+        
+        // Add error event listener for additional error details
+        recvTransport.on('error', (error) => {
+            console.error('❌ Receive transport error event:', error);
+            console.error('Error details:', {
+                message: error.message,
+                name: error.name,
+                stack: error.stack
+            });
         });
 
         // Ensure both transports are ready before producing tracks
@@ -1297,21 +1381,48 @@ async function consumeProducer(remotePeerId, producerId, kind) {
         
         // CRITICAL: Ensure receive transport is connected before consuming
         // The receive transport connects automatically when consuming, but we should verify
-        if (recvTransport.connectionState === 'new' || recvTransport.connectionState === 'connecting') {
-            console.log('Receive transport not connected, waiting for connection...');
+        const currentState = recvTransport.connectionState;
+        console.log('📊 Receive transport state before consume:', currentState);
+        
+        if (currentState === 'failed') {
+            console.error('❌ Receive transport is in failed state - cannot consume');
+            console.error('This may prevent remote video from displaying');
+            console.error('Possible causes:');
+            console.error('  - Network connectivity issues');
+            console.error('  - Firewall blocking WebRTC');
+            console.error('  - Server-side transport error');
+            console.error('  - DTLS handshake failure');
+            console.error('Try refreshing the page or check network connectivity');
+            // Don't return - MediaSoup might still allow consuming, or it will fail gracefully
+        }
+        
+        if (currentState === 'new' || currentState === 'connecting') {
+            console.log('⏳ Receive transport not connected, waiting for connection...');
             let waitCount = 0;
+            const maxWait = 50; // 5 seconds
+            
             while ((recvTransport.connectionState === 'new' || 
                     recvTransport.connectionState === 'connecting') && 
-                   waitCount < 50) {
+                   waitCount < maxWait) {
+                if (waitCount % 10 === 0) {
+                    console.log(`⏳ Waiting for receive transport (${waitCount}/${maxWait}):`, recvTransport.connectionState);
+                }
                 await new Promise(resolve => setTimeout(resolve, 100));
                 waitCount++;
             }
             
-            if (recvTransport.connectionState !== 'connected') {
-                console.warn('Receive transport did not connect, but proceeding with consume');
+            const finalState = recvTransport.connectionState;
+            if (finalState === 'connected') {
+                console.log('✅ Receive transport connected, proceeding with consume');
+            } else if (finalState === 'failed') {
+                console.error('❌ Receive transport failed during wait - consume may fail');
+                console.error('Remote video may not display due to transport failure');
             } else {
-                console.log('Receive transport connected, proceeding with consume');
+                console.warn('⚠️ Receive transport state:', finalState, '- proceeding with consume anyway');
+                console.warn('MediaSoup may connect the transport automatically during consume');
             }
+        } else if (currentState === 'connected') {
+            console.log('✅ Receive transport already connected');
         }
 
         const response = await new Promise((resolve, reject) => {
