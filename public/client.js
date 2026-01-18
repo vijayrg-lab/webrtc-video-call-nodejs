@@ -744,16 +744,27 @@ async function joinRoom() {
         });
 
         // Add error handler for transport
-        let sendTransportConnected = false;
+                let sendTransportConnected = false;
+
         sendTransport.on('connectionstatechange', (state) => {
-            console.log('Send transport connection state:', state);
-            if (state === 'connected') {
-                sendTransportConnected = true;
-            }
-            if (state === 'failed' || state === 'disconnected') {
-                console.log('Send transport connection failed');
-                sendTransportConnected = false;
-            }
+        console.log('Send transport connection state:', state);
+
+        switch (state) {
+            case 'connected':
+            sendTransportConnected = true;
+            console.log('✅ Send transport connected');
+            break;
+
+            case 'connecting':
+            console.log('⏳ Send transport connecting...');
+            break;
+
+            case 'failed':
+            case 'disconnected':
+            sendTransportConnected = false;
+            console.error('❌ Send transport failed or disconnected');
+            break;
+        }
         });
 
         // Create receive transport
