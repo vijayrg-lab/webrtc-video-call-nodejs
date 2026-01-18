@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Free WebRTC Video Call</title>
+  <title>WebRTC Moderator Video Call</title>
   <style>
     video {
       width: 45%;
@@ -11,10 +11,20 @@
   </style>
 </head>
 <body>
-  <h2>WebRTC Video Call (FREE)</h2>
+  <h2>WebRTC Multi-room Video Call</h2>
 
-  <video id="localVideo" autoplay muted playsinline></video>
-  <video id="remoteVideo" autoplay playsinline></video>
+  <label>Room ID: <input id="roomInput" placeholder="Enter room ID"></label>
+  <label>Role: 
+    <select id="roleSelect">
+      <option value="moderator">Moderator</option>
+      <option value="user">User</option>
+    </select>
+  </label>
+  <button id="joinBtn">Join Room</button>
+
+  <div id="videos">
+    <video id="localVideo" autoplay muted playsinline></video>
+  </div>
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="client.js"></script>
