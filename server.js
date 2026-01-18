@@ -6,10 +6,12 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// 🔥 THIS LINE IS MUST
+// Serve frontend
 app.use(express.static("public"));
 
 io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
   socket.on("join-room", (roomId) => {
     socket.join(roomId);
     socket.to(roomId).emit("user-joined", socket.id);
@@ -26,9 +28,13 @@ io.on("connection", (socket) => {
   socket.on("ice-candidate", (data) => {
     socket.to(data.roomId).emit("ice-candidate", data);
   });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () =>
-  console.log("Server running on port", PORT)
-);
+server.listen(PORT, () => {
+  console.log("Server running on port", PORT);
+});

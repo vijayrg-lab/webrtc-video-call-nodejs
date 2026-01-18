@@ -1,4 +1,22 @@
-<video id="local" autoplay muted></video>
-<video id="remote" autoplay></video>
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-<script src="client.js"></script>
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Free WebRTC Video Call</title>
+  <style>
+    video {
+      width: 45%;
+      border: 1px solid #ccc;
+      margin: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h2>WebRTC Video Call (FREE)</h2>
+
+  <video id="localVideo" autoplay muted playsinline></video>
+  <video id="remoteVideo" autoplay playsinline></video>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
