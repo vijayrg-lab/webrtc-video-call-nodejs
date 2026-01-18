@@ -751,7 +751,7 @@ async function joinRoom() {
                 sendTransportConnected = true;
             }
             if (state === 'failed' || state === 'disconnected') {
-                console.error('Send transport connection failed');
+                console.log('Send transport connection failed');
                 sendTransportConnected = false;
             }
         });
@@ -1050,7 +1050,7 @@ async function joinRoom() {
                         }
                         
                         if (sendTransport.connectionState !== 'connected') {
-                            console.warn('Send transport did not connect - audio production may fail');
+                            console.log('Send transport did not connect - audio production may fail');
                         } else {
                             console.log('Send transport is now connected');
                         }
