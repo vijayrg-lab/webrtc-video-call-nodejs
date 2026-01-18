@@ -951,7 +951,7 @@ async function joinRoom() {
             }
             
             if (sendTransport.connectionState !== 'connected') {
-                console.warn('Send transport did not connect in time');
+                console.log('Send transport did not connect in time');
             } else {
                 console.log('Send transport is now connected');
             }
