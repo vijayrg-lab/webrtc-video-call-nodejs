@@ -1,4 +1,5 @@
 const socket = io("YOUR_RAILWAY_BACKEND_URL");
+const roomId = window.location.pathname.substring(1) || "default-room";
 
 const pc = new RTCPeerConnection({
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
